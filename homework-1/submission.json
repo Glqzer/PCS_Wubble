@@ -1,0 +1,7 @@
+{
+    "work_dir": ".",
+    "encrypt": "./encrypt.go",
+    "decrypt": "./decrypt.go",
+    "keylength": "./keylength.go",
+    "cryptanalyze": "./cryptanalyze.go"
+  }
