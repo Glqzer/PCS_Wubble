@@ -3,15 +3,20 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	b64 "encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
@@ -22,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"vendor/golang.org/x/crypto/chacha20"
 	//"io/ioutil"
 	//"log"
 )
@@ -441,30 +447,227 @@ func registerPublicKeyWithServer(username string, pubKeyEncoded PubKeyStruct) er
 // and file hash, or an error.
 func encryptAttachment(plaintextFilePath string, ciphertextFilePath string) (string, string, error) {
 	// TODO: IMPLEMENT
-	return "", "", nil
+
+	// Select random 256-bit ChaCha20 Key
+	key := make([]byte, 32)
+	_, error := rand.Read(key)
+
+	// Error handling
+	if error != nil {
+		fmt.Println("Error generating key during encryptAttachment")
+		return "", "", error
+	}
+
+	// Open input file
+	inFile, err := os.Open(plaintextFilePath)
+	if err != nil {
+		fmt.Println("Error opening file for encryptAttachment")
+		return "", "", err
+	}
+	defer inFile.Close()
+
+	// Create output file
+	outFile, err := os.Create(ciphertextFilePath)
+	if err != nil {
+		return "", "", err
+	}
+	defer outFile.Close()
+
+	textPt, err := io.ReadAll(inFile)
+	if err != nil {
+		fmt.Print("error reading from file")
+	}
+
+	// Create a new ChaCha20 stream cipher
+	cipher, err := chacha20.NewUnauthenticatedCipher(key, make([]byte, chacha20.NonceSize))
+	if err != nil {
+		return "", "", err
+	}
+
+	ctext := make([]byte, len(textPt))
+
+	cipher.XORKeyStream(ctext, textPt)
+
+	_, err = outFile.Write(ctext)
+	if err != nil {
+		fmt.Println("Error printing to output file in encryptAttachment")
+	}
+
+	// What does file hash mean lol
+
+	h := sha256.Sum256(ctext)
+	hexH := hex.EncodeToString(h[:])
+	hexEncodedKey, err := hex.DecodeString(string(key))
+	return hexH, string(hexEncodedKey), err
 }
 
 func decodePrivateSigningKey(privKey PrivKeyStruct) ecdsa.PrivateKey {
+
+	// TODO: Implement
+
 	var result ecdsa.PrivateKey
 
-	// TODO: IMPLEMENT
+	keyBytes, err := b64.StdEncoding.DecodeString(privKey.SigSK)
+	if err != nil {
+		fmt.Println("Failed to decode privKey.SigSK in decodePrivateSigningKey")
+		return result
+	}
+
+	// Parse the PKIX public key
+	parsedPSK, err := x509.ParsePKCS8PrivateKey(keyBytes)
+	if err != nil {
+		fmt.Println("Failed to ParsePKCS8PrivateKey in decodePrivateSigningKey")
+		return result
+	}
+
+	// Type assert to ecdsa.PublicKey
+	privateKey, ok := parsedPSK.(*ecdsa.PrivateKey)
+	if !ok {
+		fmt.Println("Failed to assert type *ecdsa.PrivateKey in decodePrivateSigningKey")
+		return result
+	}
+
+	result = *privateKey
 
 	return result
 }
 
 // Sign a string using ECDSA
 func ECDSASign(message []byte, privKey PrivKeyStruct) []byte {
-	// TODO: IMPLEMENT
+	// TODO: Implement
 
-	return nil
+	decodedKey := decodePrivateSigningKey(privKey)
+
+	// Should we hash?
+	signed, err := ecdsa.SignASN1(rand.Reader, &decodedKey, message)
+	if err != nil {
+		fmt.Println("Failed to ECDSA Sign in ECDSASign")
+		return nil
+	}
+
+	return signed
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
 // byte slice as a result.
 func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyStruct, recipientPrivKey *PrivKeyStruct) ([]byte, error) {
 	// TODO: IMPLEMENT
+	
+	var parsedPayload CiphertextStruct
+    err := json.Unmarshal([]byte(payload), &parsedPayload)
+    if err != nil {
+        fmt.Println("Error parsing JSON")
+        return nil, err
+	}
 
-	return nil, nil
+	// Create toVerify
+	toVerify := parsedPayload.C1 + parsedPayload.C2
+
+	// Decode Sender's Public Signing Key
+	preParsedDecodedPublicKey, err := b64.StdEncoding.DecodeString(senderPubKey.SigPK)
+	if err != nil {
+		fmt.Println("Failed to DecodeString SigPK in decryptMessage")
+		return nil, err
+	}
+
+	preCheckedDecodedPublicKey, err := x509.ParsePKIXPublicKey(preParsedDecodedPublicKey)
+	if err != nil {
+		fmt.Println("Failed to Parse SigPK in decryptMessage")
+		return nil, err
+	}
+
+	senderPublicSigningKey, ok := preCheckedDecodedPublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		fmt.Println("Failed to assert type PrivateKey in decodePrivateSigningKey")
+		return nil, nil
+	}
+
+	// Verify the signature
+	decodedSig, err := b64.StdEncoding.DecodeString(parsedPayload.Sig)
+	if err != nil {
+		fmt.Println("Failed to decode signature in decryptMessage")
+	}
+
+	// Check if need to hash
+	toVerifyHash := sha256.Sum256([]byte(toVerify))
+	ok = ecdsa.VerifyASN1(senderPublicSigningKey, toVerifyHash[:], decodedSig)
+	if !ok {
+		fmt.Println("Signature Verification Failed")
+        return nil, nil
+    }
+
+	// Decode C1 to obtain K
+	notParsedDecodedC1, err := b64.StdEncoding.DecodeString(parsedPayload.C1)
+	if err != nil {
+		fmt.Println("Failed to B64 Decode C1 in decryptMessage")
+		return nil, err
+	}
+
+	parsedC1, err := x509.ParsePKIXPublicKey(notParsedDecodedC1)
+	if err != nil {
+		fmt.Println("Failed to Parse PKIX C1 in decryptMessage")
+		return nil, err
+	}
+
+	pC1, ok := parsedC1.(*ecdh.PublicKey)
+	if !ok {
+		return nil, nil
+	}
+
+	s, err := x509.ParsePKCS8PrivateKey([]byte(globalPrivKey.EncSK))
+	if err != nil {
+		fmt.Println("Failed to Parse PKCS8 encSK in decryptMessage")
+		return nil, err
+	}
+
+	newS, ok := s.(*ecdh.PrivateKey)
+	if !ok {
+		return nil, nil
+	}
+
+	// ECDH pC1
+	val, err := newS.ECDH(pC1)
+	k := sha256.Sum256(val)
+
+	// Decode C2
+	DecodedC2, err := b64.StdEncoding.DecodeString(parsedPayload.C2)
+	if err != nil {
+		fmt.Println("Failed to B64 Decode C2 in decryptMessage")
+		return nil, err
+	}
+
+	// Decode ChaCha
+	stream, err := chacha20.NewUnauthenticatedCipher(k[:], make([]byte, chacha20.NonceSize))
+
+	mPrime := make([]byte, len(parsedPayload.C2))
+
+	stream.XORKeyStream(mPrime, DecodedC2)
+
+	// Parse M'
+	check := mPrime[len(mPrime) - 4:]
+
+	// Compute Check
+	checkPrime := crc32.ChecksumIEEE(mPrime[:len(mPrime) - 4])
+	checkPrimeBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(checkPrimeBytes, checkPrime)
+
+	if !bytes.Equal(check, checkPrimeBytes) {
+		fmt.Println("REJECTION!")
+		return nil, nil
+	}
+	
+	// Compute Username Check
+
+	indexOfColon := bytes.IndexByte(mPrime[:len(mPrime) - 4], 0x3A)
+
+	username := mPrime[:indexOfColon]
+
+	if !bytes.Equal(username, []byte(senderUsername)) {
+		fmt.Println("REJECTION!")
+		return nil, nil
+	}
+
+	return mPrime[indexOfColon+1 : len(mPrime) - 4], nil
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -472,12 +675,110 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct) []byte {
 	// TODO: IMPLEMENT
 
-	return nil
+	// Decode encPK as a point on the P-256 curve
+	encPKBytes, err := b64.StdEncoding.DecodeString(pubkey.EncPK)
+	if err != nil {
+		fmt.Println("Failed to Decode pubkey.EncPK in encryptMessage")
+		return nil
+	}
+
+	// Parse the PKIX public key
+	parsedEncPK, err := x509.ParsePKIXPublicKey(encPKBytes)
+	if err != nil {
+		fmt.Println("Failed to parse EncPK as ParsePKIX in encryptMessage")
+		return nil
+	}
+
+	// Type assert to *ecdh.PublicKey
+	decodedEncPK, ok := parsedEncPK.(*ecdh.PublicKey)
+	if !ok {
+		fmt.Println("Failed to assert parsedEncPK as *ecdsa.PublicKey in encryptMessage")
+		return nil
+	}
+
+	// Decode encSK
+	encSKBytes, err := b64.StdEncoding.DecodeString(globalPrivKey.EncSK)
+	parsedEncSK, err := x509.ParsePKCS8PrivateKey(encSKBytes)
+	decodedEncSK, ok := parsedEncSK.(*ecdh.PrivateKey)
+	if !ok {
+		fmt.Println("Failed to assert parsedEncSK as *ecdh.PrivateKey in encryptMessage")
+		return nil
+	}
+
+	// computed ssk?
+	ssk, err := decodedEncSK.ECDH(decodedEncPK)
+	if err != nil {
+		return nil
+	}
+
+	// sha256(ssk)?
+	k := sha256.Sum256(ssk)
+
+	// encode epk into C1?
+	C1Pre64, err := x509.MarshalPKIXPublicKey(decodedEncPK)
+	if err != nil {
+		fmt.Println("Failed to encode PK through PKIX in encryptMessage")
+		return nil
+	}
+	C1 := b64.StdEncoding.EncodeToString(C1Pre64)
+
+	// Now compute C2
+
+	// Check if the colon character (0x3A) is present in the sender's username
+    if strings.Contains(senderUsername, ":") {
+        fmt.Print("Username contains :")
+        return nil
+    }
+
+	// Construct the message string M'
+	usernameBytes := []byte(senderUsername)
+	concatenatedMessage := append(usernameBytes, byte(0x3A))
+	concatenatedMessage = append(concatenatedMessage, message...)
+
+
+	// Define the polynomial for CRC32 (IEEE)
+	checksum := crc32.ChecksumIEEE(concatenatedMessage)
+
+    // Concatenate the message and the checksum (???)
+	checksumBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(checksumBytes, checksum)
+    concatenatedMessage = append(concatenatedMessage, checksumBytes...)
+
+	// ChaCha20 (concatenatedMessage is M'')
+	cipherstream, err := chacha20.NewUnauthenticatedCipher(k[:], make([]byte, chacha20.NonceSize))
+	if err != nil {
+		fmt.Println("Failed to create cipherstream for ChaCha20 in encryptMessage")
+		return nil
+	}
+
+	// Stream cipher things
+	ciphertext := make([]byte, len(concatenatedMessage))
+    cipherstream.XORKeyStream(ciphertext, concatenatedMessage)
+
+    // Encode the ciphertext using BASE64
+    C2 := b64.StdEncoding.EncodeToString(ciphertext)
+
+	toSign := C1 + C2
+
+	// Hash Message before Signing
+	toSignHash := sha256.Sum256([]byte(toSign))
+
+	signedMessage := ECDSASign(toSignHash[:], globalPrivKey)
+
+	// TODO: ASK WHAT IT RETURNS
+	ct := CiphertextStruct{
+			C1:   C1,
+			C2:	  string(C2),
+			Sig:  string(signedMessage),
+	}
+	jsonText, _ := json.Marshal(ct)
+
+	return jsonText
 }
 
 // Decrypt a list of messages in place
 func decryptMessages(messageArray []MessageStruct) {
-	// TODO: IMPLEMENT
+	
 }
 
 // Download any attachments in a message list
@@ -566,10 +867,51 @@ func getTempFilePath() string {
 
 // Generate a fresh public key struct, containing encryption and signing keys
 func generatePublicKey() (PubKeyStruct, PrivKeyStruct, error) {
+	// This is somewhat confidently complete - ish
+
 	var pubKey PubKeyStruct
 	var privKey PrivKeyStruct
 
-	// TODO: IMPLEMENT
+	// Generate Key
+	enc, err := ecdh.Curve.GenerateKey(ecdh.P256(), rand.Reader)
+	if err != nil {
+		return pubKey, privKey, nil
+	}
+
+	// Encode Private Key Enc and Set Value
+	arrBytes, err := x509.MarshalPKCS8PrivateKey(enc)
+	if err != nil {
+		return pubKey, privKey, nil
+	}
+	privKey.EncSK = b64.StdEncoding.EncodeToString(arrBytes)
+
+	// Encode Public Key Enc and Set Value
+	arrBytes, err = x509.MarshalPKIXPublicKey(enc.PublicKey)
+	if err != nil {
+		return pubKey, privKey, nil
+	}
+	pubKey.EncPK = b64.StdEncoding.EncodeToString(arrBytes)
+
+	// Generate new key
+	sig, err := ecdh.Curve.GenerateKey(ecdh.P256(), rand.Reader)
+	if err != nil {
+		return pubKey, privKey, nil
+	}
+
+	// Encode Signing Key sigSK
+	arrBytes, err = x509.MarshalPKCS8PrivateKey(sig)
+	if err != nil {
+		return pubKey, privKey, nil
+	}
+	privKey.SigSK = b64.StdEncoding.EncodeToString(arrBytes)
+
+	// Encode Signing Key sigPK
+	arrBytes, err = x509.MarshalPKIXPublicKey(sig.PublicKey)
+	if err != nil {
+		fmt.Println("Failed to encode sig.PublicKey in GeneratePublicKey")
+		return pubKey, privKey, nil
+	}
+	pubKey.SigPK = b64.StdEncoding.EncodeToString(arrBytes)
 
 	return pubKey, privKey, nil
 }
