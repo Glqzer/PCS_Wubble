@@ -690,10 +690,15 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	}
 
 	// Type assert to *ecdh.PublicKey
-	decodedEncPK, ok := parsedEncPK.(*ecdh.PublicKey)
+	decodedEncPKRSA, ok := parsedEncPK.(*ecdsa.PublicKey)
 	if !ok {
 		fmt.Println("Failed to assert parsedEncPK as *ecdsa.PublicKey in encryptMessage")
 		return nil
+	}
+
+	decodedEncPK, err := decodedEncPKRSA.ECDH()
+	if err != nil {
+		fmt.Println("Error parsing ECDH in EncryptMessage", err)
 	}
 
 	// Decode encSK
@@ -778,7 +783,21 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 
 // Decrypt a list of messages in place
 func decryptMessages(messageArray []MessageStruct) {
-	
+	for i := range messageArray {
+		senderPubKey, _ := getPublicKeyFromServer(messageArray[i].From)
+		if messageArray[i].ReceiptID == 0 && len (messageArray[i].Payload) > 0 {
+			decryptedMessage, err := decryptMessage(messageArray[i].Payload, messageArray[i].From, senderPubKey, &globalPrivKey)
+			if err != nil {
+				fmt.Print ("Unable to decrypt message: ", err)
+			} else {
+				messageArray[i].decrypted = string(decryptedMessage)
+				// Send read receipt
+				sendMessageToServer(username, messageArray[i].From, []byte(""), messageArray[i].Id)
+			}
+		} else {
+			fmt.Println("got read receipt")
+		}
+    }
 }
 
 // Download any attachments in a message list
@@ -913,6 +932,9 @@ func generatePublicKey() (PubKeyStruct, PrivKeyStruct, error) {
 	}
 	pubKey.SigPK = b64.StdEncoding.EncodeToString(arrBytes)
 
+	globalPubKey = pubKey
+	globalPrivKey = privKey
+
 	return pubKey, privKey, nil
 }
 
@@ -1036,8 +1058,29 @@ func main() {
 			if len(parts) < 3 {
 				fmt.Println("Correct usage: attach <username> <filename>")
 			} else {
-				fmt.Println("NOT IMPLEMENTED YET")
-				// TODO: IMPLEMENT
+				// We have username and filename
+				recipient := strings.TrimSpace(parts[1])
+				filename := strings.TrimSpace(parts[2])
+
+				// Temporary File Path
+				encFilePath := getTempFilePath()
+
+				// Encrypt File
+				hexKey, hash, err := encryptAttachment(filename, encFilePath)
+				if err != nil {
+					fmt.Println("Failed to encrypt attachment in main")
+				}
+
+				// Upload encrypted file, get URL
+				fileURL, err := uploadFileToServer(encFilePath)
+				if err != nil {
+					fmt.Println("Failed to upload encrypted attachment in main")
+				}
+
+				// Format String and Send Message
+				attachmentString := ">>>MSGURL=<" + fileURL + ">?KEY=<"  + hexKey + ">?H=<" + hash + ">"
+
+				sendMessageToServer(username, recipient, []byte(attachmentString), 0)
 			}
 		case "QUIT":
 			running = false
