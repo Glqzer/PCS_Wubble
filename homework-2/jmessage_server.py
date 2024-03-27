@@ -9,29 +9,31 @@
 # Copyright 2024 Harrison Green and Matthew D. Green
 # May be redistributed under the terms of the MIT License (https://opensource.org/license/mit/)
 
-import sys, sqlite3, uuid
-from passlib.hash import scrypt
+import os
+import secrets
+import sqlite3
+import string
+import uuid
 from datetime import datetime
+
+from PIL import Image
 from flask import Flask
-from flask import request
 from flask import Response
 from flask import jsonify
+from flask import request
 from flask import send_file
-import os
-from werkzeug.utils import secure_filename
-from PIL import Image
-import string
-import secrets
+from passlib.hash import scrypt
 
 # Global variables
-alphabet = string.ascii_letters + string.digits # avaliable characters for creating apikeys
+alphabet = string.ascii_letters + string.digits  # avaliable characters for creating apikeys
 startupTime = 0
 app = Flask(__name__)
-conn = None 
+conn = None
 attachmentsDir = "./JMESSAGE_FILES"
 ONE_WEEK_IN_SECONDS = (7 * 3600 * 24)
 
 APIkeyDict = {}
+
 
 # Helper functions
 
@@ -43,12 +45,13 @@ def opendb(db_file):
     try:
         # TODO: This thread warning suppression is probably super bad!
         conn = sqlite3.connect(db_file, check_same_thread=False)
-        #conn.row_factory = sqlite3.Row
+        # conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:
         print(e)
-        
+
     return conn
+
 
 def create_table(conn, sql_command):
     # Create a new table given a connection object and a SQL command
@@ -60,6 +63,7 @@ def create_table(conn, sql_command):
     except sqlite3.Error as e:
         print(e)
 
+
 def drop_table(conn, tableName):
     # Drop a table
     try:
@@ -70,20 +74,22 @@ def drop_table(conn, tableName):
     except sqlite3.Error as e:
         print(e)
 
+
 def eraseAttachments(conn, olderThan):
     try:
         c = conn.cursor()
         c.execute("SELECT filePath, creationTime FROM attachments;")
         attachmentList = c.fetchall()
 
-        #print("Deleting attachments...")
+        # print("Deleting attachments...")
         for row in attachmentList:
             if (row[1] < olderThan) or (olderThan == 0):
-                #print("\t" + row[0])
+                # print("\t" + row[0])
                 os.remove(row[0])
 
     except sqlite3.Error as e:
         print(e)
+
 
 def getUserList(conn):
     # Get a list of users from the database
@@ -99,24 +105,25 @@ def getUserList(conn):
             responseArray.append(rowDict)
 
         return responseArray
-    
+
     except sqlite3.Error as e:
         print(e)
         return None
-    
+
+
 def getMessageList(conn, username):
     # Get a list of messages for user <username> from the database
     try:
         c = conn.cursor()
         sqlite_lookup_with_param = """SELECT userFrom, userTo, senderID, receiptID, payload FROM messages WHERE userTo = ?;"""
-        data_tuple = (username, )
+        data_tuple = (username,)
         c.execute(sqlite_lookup_with_param, data_tuple)
         messageList = c.fetchall()
 
         # Convert to an array of dictionaries
         responseArray = []
         for row in messageList:
-            rowDict = {'from': row[0], 'to': row[1], 'id': row[2], 'receiptID' : row[3], 'payload' : row[4]}
+            rowDict = {'from': row[0], 'to': row[1], 'id': row[2], 'receiptID': row[3], 'payload': row[4]}
             responseArray.append(rowDict)
 
         # Delete those messages in a separate statement (very inefficient!)
@@ -138,10 +145,11 @@ def getMessageList(conn, username):
         # I would like. I tried using the RowFactory attribute in conn, but it didn't work.
         # Need to fix this.
         return responseArray
-    
+
     except sqlite3.Error as e:
         print(e)
         return None
+
 
 def addNewUser(conn, username, password, encPK, sigPK):
     # Add a new user to the database
@@ -158,17 +166,18 @@ def addNewUser(conn, username, password, encPK, sigPK):
 
         conn.commit()
         return True
-    
+
     except sqlite3.Error as e:
         print(e)
         return False
+
 
 def saveMessageData(conn, fromUser, toUser, senderID, receiptID, payload):
     try:
         # Generate timestamp and UUID
         timestamp = getUnixTime()
         globalID = uuid.uuid4()
-    
+
         # Insert fields into database
         c = conn.cursor()
         sqlite_insert_with_param = """INSERT INTO messages
@@ -176,7 +185,7 @@ def saveMessageData(conn, fromUser, toUser, senderID, receiptID, payload):
                           VALUES (?, ?, ?, ?, ?, ?, ?);"""
 
         try:
-            data_tuple = (str(globalID), fromUser, toUser, timestamp, senderID, receiptID, payload, )
+            data_tuple = (str(globalID), fromUser, toUser, timestamp, senderID, receiptID, payload,)
             c.execute(sqlite_insert_with_param, data_tuple)
             conn.commit()
 
@@ -184,23 +193,23 @@ def saveMessageData(conn, fromUser, toUser, senderID, receiptID, payload):
             print(e)
 
         return True
-    
+
     except sqlite3.Error as e:
         print(e)
         return False
-    
+
+
 def verifyUserPassword(conn, username, password):
-        c = conn.cursor()
-        c.execute("SELECT username, pwdhash FROM users WHERE username= ?", (username,))
-        userList = c.fetchall()
-        if scrypt.verify(password, userList[0][1]):
-            return True
-
-        else:
-            print('Password invalid!')
-            return False
-
-        print(userList)
+    c = conn.cursor()
+    c.execute("SELECT username, pwdhash FROM users WHERE username= ?", (username,))
+    userList = c.fetchall()
+    if len(userList) == 0 or userList is None:
+        print('User name not found! you need to register first')
+    elif scrypt.verify(password, userList[0][1]):
+        return True
+    else:
+        print('Password invalid!')
+        return False
 
 
 def getPubKey(conn, username):
@@ -211,8 +220,9 @@ def getPubKey(conn, username):
 
     return data, 200
 
+
 def storePubKey(conn, username, encPK, sigPK):
-     # Add a new public key to the database
+    # Add a new public key to the database
     try:
         c = conn.cursor()
         sqlite_insert_with_param = """UPDATE users
@@ -223,14 +233,16 @@ def storePubKey(conn, username, encPK, sigPK):
 
         conn.commit()
         return True
-    
+
     except sqlite3.Error as e:
         print(e)
         return False
 
+
 def getUnixTime():
     # Return the current Unix timestamp as an int
     return int(datetime.now().timestamp())
+
 
 def initializeDatabase(conn, reset, testMode):
     # Initialize the database and optionally delete and/or create new tables
@@ -252,7 +264,7 @@ def initializeDatabase(conn, reset, testMode):
                                         createdTime integer,
                                         checkedTime integer
                                     ); """
-    
+
     create_table(conn, sql_create_users_table)
 
     # Create the "messages" table
@@ -280,7 +292,8 @@ def initializeDatabase(conn, reset, testMode):
         addNewUser(conn, username="alice", password="abc", encPK="12345", sigPK="45678")
         addNewUser(conn, username="bob", password="def", encPK="12345", sigPK="45678")
         addNewUser(conn, username="charlie", password="ghi", encPK="12345", sigPK="45678")
-        addNewUser(conn, username="dave", password="jkl",  encPK="12345", sigPK="45678")
+        addNewUser(conn, username="dave", password="jkl", encPK="12345", sigPK="45678")
+
 
 # creates a user folder if it doesn't exist
 def createFolder(directory):
@@ -291,18 +304,21 @@ def createFolder(directory):
             print('a')
 
     except OSError:
-        print('Error: Creating directory. '+ directory)
-    
+        print('Error: Creating directory. ' + directory)
+
     return a
+
 
 # returns an image to program
 def returnImage(imgPath):
     return Image.open(imgPath)
 
+
 # Generate a random filename and set up a path
 def generateRandomFilename(username):
     filename = "".join(secrets.choice(alphabet) for i in range(24))
     return (attachmentsDir + "/" + username + "/", filename + ".dat")
+
 
 # creates a new api key for users
 def createAPIkey(username) -> string:
@@ -313,6 +329,7 @@ def createAPIkey(username) -> string:
     else:
         return APIkeyDict[username]
 
+
 def checkAPIkey(username, apikey):
     try:
         actualAPIKey = APIkeyDict[username]
@@ -320,15 +337,17 @@ def checkAPIkey(username, apikey):
             return True
     except KeyError:
         return False
-    
+
     return False
+
 
 # Flask command handlers
 
 @app.route("/")
 def server_uptime():
     serverUptime = getUnixTime() - startupTime
-    return f"JMessage server, uptime = {serverUptime} seconds" 
+    return f"JMessage server, uptime = {serverUptime} seconds"
+
 
 @app.route("/listUsers")
 def list_users():
@@ -338,18 +357,19 @@ def list_users():
         return userList, 200
     else:
         return "{ }", 403
-    
-@app.route('/uploadKey/<username>/<apikey>', methods = ['POST'])
+
+
+@app.route('/uploadKey/<username>/<apikey>', methods=['POST'])
 def reg_pubkey(username, apikey):
-    #print("Registering public key for user " + username)
+    # print("Registering public key for user " + username)
 
     # Verify the user's credentials
     if (checkAPIkey(username, apikey) == False):
         resp = jsonify(success=False)
         return resp, 401
-    
+
     # Parse the incoming JSON data for "encPK", "sigPK"
-    data = request.json 
+    data = request.json
     encPK = data['encPK']
     sigPK = data['sigPK']
 
@@ -362,50 +382,48 @@ def reg_pubkey(username, apikey):
 
     return resp
 
+
 @app.route("/lookupKey/<username>")
 def lookUpPubKey(username):
     result = getPubKey(conn, username)
 
     if result == None:
-        resp = jsonify(success=False) # Return success
+        resp = jsonify(success=False)  # Return success
         return resp
-    
-    else: 
+
+    else:
         return result
-    
-@app.route("/registerUser/<username>/<password>") 
-def register_user(username,password):
+
+
+@app.route("/registerUser/<username>/<password>")
+def register_user(username, password):
     if addNewUser(conn, username, password, "", "") == True:
-        return Response("{}", status=200, mimetype='application/json')   
-    else: 
-        return Response("{}", status=409, mimetype='application/json')   
+        return Response("{}", status=200, mimetype='application/json')
+    else:
+        return Response("{}", status=409, mimetype='application/json')
+
 
 @app.route("/login/<username>/<password>")
 def logIn(username, password):
-    #TODO: have log in here and make it store information locally, so that it can remain logged in and you dont have to put your hash in like 50 times.
+    # TODO: have log in here and make it store information locally, so that it can remain logged in and you dont have to put your hash in like 50 times.
     # this should also make an apikey 
 
-    #print("got login")
+    # print("got login")
     if verifyUserPassword(conn, username, password):
         key = createAPIkey(username)
-
-        data = { 
-            "APIKey" : key, 
-        } 
-
         if key != "":
-            return data
+            return {"APIKey": key}, 200
         else:
-            return Response("{}", status=401, mimetype='application/json')   
-            return resp
+            return Response("{}", status=401, mimetype='application/json')
+    return Response("{}", status=401, mimetype='application/json')
 
-# allows user to upload a file which saves to a user folder
+
 @app.route("/uploadFile/<user>/<apikey>", methods=['GET', 'POST'])
 def uploadFile(user, apikey):
     APIkeResault = checkAPIkey(user, apikey)
     if APIkeResault == True:
         if request.method == 'POST':
-            #print(request.get_data())
+            # print(request.get_data())
             if 'filefield' not in request.files:
                 return 'No file attached', 400
             f = request.files['filefield']
@@ -418,7 +436,7 @@ def uploadFile(user, apikey):
 
             # Save the file
             fileNameAndPath = saveFilePath + saveFilename
-            f.save(fileNameAndPath)   
+            f.save(fileNameAndPath)
 
             # Insert the file into the attachments directory
             c = conn.cursor()
@@ -435,37 +453,38 @@ def uploadFile(user, apikey):
             eraseAttachments(conn, timestamp - ONE_WEEK_IN_SECONDS)
 
             returnFilePath = "/" + user + "/" + saveFilename
-            data = { 
-                "path" : returnFilePath, 
-            } 
+            data = {
+                "path": returnFilePath,
+            }
 
             return data, 200
-        
-        else: 
+
+        else:
             return jsonify("Nothing Passed"), 400
-        
+
     else:
         return jsonify(error=APIkeResault), 401
+
 
 # returns a file to the user
 @app.route("/downloadFile/<username>/<filename>")
 def returnFile(username, filename):
-
     try:
-        realPath = os.path.realpath(attachmentsDir + "/" + username + "/" + filename)
+        real_path = os.path.realpath(attachmentsDir + "/" + username + "/" + filename)
 
-        if os.path.commonprefix((realPath, os.path.realpath(attachmentsDir))) != os.path.realpath(attachmentsDir): 
+        if os.path.commonprefix((real_path, os.path.realpath(attachmentsDir))) != os.path.realpath(attachmentsDir):
             return "<p>Invalid path</P>", 401
 
-        return send_file(realPath, mimetype='application/octet-stream'), 200
+        return send_file(real_path, mimetype='application/octet-stream'), 200
 
     except:
         return "<p>File does not exist</p>", 404
-    
+
+
 # returns all of a users files
-#@app.route("/<user>/files")
-#def returnUsersFiles(user):
-    # looks through all files in the directory if possible
+# @app.route("/<user>/files")
+# def returnUsersFiles(user):
+# looks through all files in the directory if possible
 #    try:
 #        path = "userFiles/{user}".format(user=user)
 #        fileList = os.listdir(path)
@@ -478,47 +497,39 @@ def returnFile(username, filename):
 #        return f"404 User \"{user}\" does not exist."
 
 # temp until client is made
-    
-@app.route("/sendMessage/<username>/<apikey>",methods=['GET', 'POST'])
+
+@app.route("/sendMessage/<username>/<apikey>", methods=['GET', 'POST'])
 def sendMessage(username, apikey):
+    false_response = jsonify(success=False), 404
+    if request.method != 'POST': return false_response
+    # Check that the user credentials are legitimate
+    if not checkAPIkey(username, apikey): return false_response
+    # Note, we don't trust the "from" field of the uploaded JSON
+    data = request.json
+    alleged_from = data.get('from')
+    send_to = data.get('to')
+    message_id = data.get('id')
+    receipt_id = data.get('receiptID')
+    payload = data.get('payload')
+    # Make sure the user posting the message matches the 'from' field
+    if alleged_from != username: return "<p>Message from does not match username</p>", 401
+    saveMessageData(conn, username, send_to, message_id, receipt_id, payload)
+    return jsonify(success=True), 200
 
-    if request.method == 'POST':
-        # Check that the user credentials are legitimate
-        if checkAPIkey(username, apikey) == True:
-            # Note, we don't trust the "from" field of the uploaded JSON
-            data = request.json
-            allegedFrom = data.get('from')
-            sendTo = data.get('to')
-            messageID = data.get('id')
-            receiptID = data.get('receiptID')
-            payload = data.get('payload')
 
-            # Make sure the user posting the message matches the 'from' field
-            if allegedFrom != username:
-                return "<p>Message from does not match username</p>", 401
-
-            saveMessageData(conn, username, sendTo, messageID, receiptID, payload)
-            resp = jsonify(success=True)
-            return resp, 200
-
-    # Invalid request
-    resp = jsonify(success=False)
-    return resp, 404
-
-@app.route("/getMessages/<username>/<apikey>",methods=['GET', 'POST'])
+@app.route("/getMessages/<username>/<apikey>", methods=['GET', 'POST'])
 def getMessages(username, apikey):
     # Check that the user credentials are legitimate
-    if checkAPIkey(username, apikey) == True:
-        messages = getMessageList(conn, username)
-        if messages != None:
-            return messages, 200
+    false_response = jsonify(success=False)
+    if not checkAPIkey(username, apikey): return false_response, 401
+    messages = getMessageList(conn, username)
+    if messages is None: return false_response, 401
+    return messages, 200
 
-    # Invalid request
-    resp = jsonify(success=False)
-    return resp, 401
 
-if __name__ == '__main__':  
+if __name__ == '__main__':
     from argparse import ArgumentParser
+
     parser = ArgumentParser()
     parser.add_argument('-r', action='store_true', help='reset and wipe the database')
     parser.add_argument('-t', action='store_true', help='test mode, fills the database with simulated data')
@@ -526,7 +537,8 @@ if __name__ == '__main__':
     parser.add_argument('-tlscert', action='store_true', help='use TLS cert: local.crt and local.key in same directory')
     parser.add_argument("port", nargs='?', type=int, default='8080', help='server port')
     parser.add_argument("dbfile", nargs='?', default='./sqldb', help='SQL lite database file, default is ./sqldb')
-    parser.add_argument("attachdir", nargs='?', default='./JMESSAGE_FILES/', help='Attachments directory, default is ./JMESSAGE_FILES')
+    parser.add_argument("attachdir", nargs='?', default='./JMESSAGE_FILES/',
+                        help='Attachments directory, default is ./JMESSAGE_FILES')
     args = parser.parse_args()
 
     serverPort = args.port
@@ -540,7 +552,7 @@ if __name__ == '__main__':
 
     if conn is not None:
         initializeDatabase(conn, reset, testMode)
-        
+
     else:
         print("Could not initialize database, exiting.")
         exit()
@@ -549,18 +561,17 @@ if __name__ == '__main__':
     startupTime = getUnixTime()
 
     # Set up TLS options
-    if args.tlscert == True:
+    if args.tlscert:
         context = ('local.crt', 'local.key')
         print("Using TLS certificate/keyfile local.crt, local,key")
-    elif args.notls == True:
+    elif args.notls:
         context = None
         print("Disabling TLS")
     else:
-        context = 'adhoc' # default: self-signed
+        context = 'adhoc'  # default: self-signed
         print("Using TLS with self-signed certificates")
 
     # # Launch the Flask (development) server.
     # #app = create_app(foo)
     createFolder("")
-    app.run(port=serverPort, debug=False, ssl_context=context)
-    
+    app.run(port=serverPort, debug=True, ssl_context=context)
