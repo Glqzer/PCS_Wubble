@@ -607,62 +607,60 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 
 	// WORKS UP TO HERE
 
-	// Decode C1 to obtain K
+	// Decode Sender's Encryption Public Key
 	notParsedDecodedC1, err := b64.StdEncoding.DecodeString(parsedPayload.C1)
 	if err != nil {
 		fmt.Println("Error 7 in decryptMessage")
 		return nil, err
 	}
 
-	parsedC1, err := x509.ParsePKIXPublicKey(notParsedDecodedC1)
+	parsedSenderPK, err := x509.ParsePKIXPublicKey(notParsedDecodedC1)
 	if err != nil {
 		fmt.Println("Error 8 in decryptMessage")
 		return nil, err
 	}
 
 	// Decoded encPK
-	pC1RSA, ok := parsedC1.(*ecdsa.PublicKey)
+	SenderPKRSA, ok := parsedSenderPK.(*ecdsa.PublicKey)
 	if !ok {
 		fmt.Println("Error 9 in decryptMessage")
 		return nil, err
 	}
 
-	pC1, err := pC1RSA.ECDH()
+	SenderEncPK, err := SenderPKRSA.ECDH()
 	if err != nil {
 		fmt.Println("Error 10 in decryptMessage")
 		return nil, err
 	}
 
-	// WORKS UNTIL HERE
-
 	// Decrypt Recipient Private Encryption Key
-	privateEncKey, err := b64.StdEncoding.DecodeString(recipientPrivKey.EncSK)
+	privateRecipEncKey, err := b64.StdEncoding.DecodeString(recipientPrivKey.EncSK)
 	if err != nil {
 		fmt.Println("Error 11 in decryptMessage")
 		return nil, err
 	}
 
 
-	privateEncryptionKeyPreCheck, err := x509.ParsePKCS8PrivateKey(privateEncKey)
+	privateRecipEncryptionKeyPreCheck, err := x509.ParsePKCS8PrivateKey(privateRecipEncKey)
 	if err != nil {
 		fmt.Println("Error 12 in decryptMessage")
 		return nil, err
 	}
 
-	PrivateEncryptionKeyECDSA, ok := privateEncryptionKeyPreCheck.(*ecdsa.PrivateKey)
+	PrivateEncryptionKeyECDSA, ok := privateRecipEncryptionKeyPreCheck.(*ecdsa.PrivateKey)
 	if !ok {
 		fmt.Println("Error 13 in decryptMessage")
 		return nil, err
 	}
 
-	PrivateEncryptionKey, err := PrivateEncryptionKeyECDSA.ECDH()
+	RecipientEncSK, err := PrivateEncryptionKeyECDSA.ECDH()
 	if err != nil {
 		fmt.Println("Error 14 in decryptMessage")
 		return nil, err
 	}
 
-	// ECDH pC1 to get Shared Secret Key
-	val, err := PrivateEncryptionKey.ECDH(pC1)
+	// Shared Secret Key, Recipient Private Key, Sender Public Key
+	val, err := RecipientEncSK.ECDH(SenderEncPK)
 	if err != nil {
 		fmt.Println("Error 15 in decryptMessage")
 		return nil, err
@@ -678,38 +676,43 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 		return nil, err
 	}
 
+
 	// Decode ChaCha
 	stream, err := chacha20.NewUnauthenticatedCipher(k[:], make([]byte, chacha20.NonceSize))
 
-	mPrime := make([]byte, len(parsedPayload.C2))
+	decryptedMessage := make([]byte, len(DecodedC2))
 
-	stream.XORKeyStream(mPrime, DecodedC2)
+	stream.XORKeyStream(decryptedMessage, DecodedC2)
 
 	// Parse M'
-	check := mPrime[len(mPrime)-4:]
+	originalMessageLength := len(decryptedMessage) - 4
 
 	// Compute Check
-	checkPrime := crc32.ChecksumIEEE(mPrime[:len(mPrime)-4])
-	checkPrimeBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(checkPrimeBytes, checkPrime)
+	originalMessage := decryptedMessage[:originalMessageLength]
+	originalChecksum := decryptedMessage[originalMessageLength:]
+	computedChecksum := crc32.ChecksumIEEE(originalMessage)
 
-	if !bytes.Equal(check, checkPrimeBytes) {
+	// Turn checkSum into bytes
+	computedChecksumBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(computedChecksumBytes, computedChecksum)
+
+	if !bytes.Equal(computedChecksumBytes, originalChecksum) {
 		fmt.Println("Rejected: 1")
 		return nil, nil
 	}
 
 	// Compute Username Check
 
-	indexOfColon := bytes.IndexByte(mPrime[:len(mPrime)-4], 0x3A)
+	indexOfColon := bytes.IndexByte(originalMessage, 0x3A)
 
-	username := mPrime[:indexOfColon]
+	username := originalMessage[:indexOfColon]
 
 	if !bytes.Equal(username, []byte(senderUsername)) {
 		fmt.Println("Rejected: 2")
 		return nil, nil
 	}
 
-	return mPrime[indexOfColon+1 : len(mPrime)-4], nil
+	return originalMessage[indexOfColon+1:], nil
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -717,7 +720,7 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct) []byte {
 	// TODO: IMPLEMENT
 
-	// Decode encPK as a point on the P-256 curve
+	// Decode recipient's public key as a point on the P-256 curve
 	encPKBytes, err := b64.StdEncoding.DecodeString(pubkey.EncPK)
 	if err != nil {
 		fmt.Println("Error 1 in encryptMessage")
@@ -738,12 +741,13 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 		return nil
 	}
 
-	decodedEncPK, err := decodedEncPKRSA.ECDH()
+	// DecodedEncPK is the recipient's public key
+	RecipientEncPK, err := decodedEncPKRSA.ECDH()
 	if err != nil {
 		fmt.Println("Error 4 in EncryptMessage")
 	}
 
-	// Decode encSK
+	// Decode encSK, sender's private key
 	encSKBytes, err := b64.StdEncoding.DecodeString(globalPrivKey.EncSK)
 	if err != nil {
 		fmt.Println("Error 5 in EncryptMessage")
@@ -760,15 +764,16 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 		return nil
 	}
 
-	decodedEncSK, err := decodedEncSKRSA.ECDH()
+	SenderEncSK, err := decodedEncSKRSA.ECDH()
 	if err != nil {
 		fmt.Println("Error 8 in EncryptMessage")
 	}
 
-	// We have now decoded EncPK and EncSK
+	// decodedEncSK = Sender's Encryption Private Key
+	// decodedEncPK = Recipient's Encryption Public Key
 
-	// computed ssk?
-	ssk, err := decodedEncSK.ECDH(decodedEncPK)
+	// Shared Secret Key: Sender's private key, Recipient Public Key
+	ssk, err := SenderEncSK.ECDH(RecipientEncPK)
 	if err != nil {
 		fmt.Println("Error 9 in EncryptMessage")
 	}
@@ -776,12 +781,8 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	// sha256(ssk)?
 	k := sha256.Sum256(ssk)
 
-	// TODO: encode epk into C1?
-	C1Pre64, err := x509.MarshalPKIXPublicKey(decodedEncPK)
-	if err != nil {
-		fmt.Println("Error 10 in EncryptMessage")
-	}
-	C1 := b64.StdEncoding.EncodeToString(C1Pre64)
+	// Encode Sender's Encryption Public Key into C1
+	C1 := globalPubKey.EncPK
 
 	// Now compute C2
 
@@ -792,17 +793,15 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	}
 
 	// Construct the message string M'
-	usernameBytes := []byte(senderUsername)
-	concatenatedMessage := append(usernameBytes, byte(0x3A))
-	concatenatedMessage = append(concatenatedMessage, message...)
+	concatenatedMessage := senderUsername + string(byte(0x3A)) + string(message)
 
 	// Define the polynomial for CRC32 (IEEE)
-	checksum := crc32.ChecksumIEEE(concatenatedMessage)
+	checksum := crc32.ChecksumIEEE([]byte(concatenatedMessage))
+	checksumBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(checksumBytes, checksum)
 
 	// Concatenate the message and the checksum (???)
-	checksumBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(checksumBytes, checksum)
-	concatenatedMessage = append(concatenatedMessage, checksumBytes...)
+	concatenatedMessageBytes := append([]byte(concatenatedMessage), checksumBytes...)
 
 	// ChaCha20 (concatenatedMessage is M'')
 	cipherstream, err := chacha20.NewUnauthenticatedCipher(k[:], make([]byte, chacha20.NonceSize))
@@ -811,8 +810,9 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	}
 
 	// Stream cipher things
-	ciphertext := make([]byte, len(concatenatedMessage))
-	cipherstream.XORKeyStream(ciphertext, concatenatedMessage)
+	ciphertext := make([]byte, len(concatenatedMessageBytes))
+	cipherstream.XORKeyStream(ciphertext, concatenatedMessageBytes)
+
 
 	// Encode the ciphertext using BASE64
 	C2 := b64.StdEncoding.EncodeToString(ciphertext)
@@ -849,13 +849,18 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 // Decrypt a list of messages in place
 func decryptMessages(messageArray []MessageStruct) {
 	for i := range messageArray {
+
 		senderPubKey, _ := getPublicKeyFromServer(messageArray[i].From)
+
 		if messageArray[i].ReceiptID == 0 && len(messageArray[i].Payload) > 0 {
+
 			decryptedMessage, err := decryptMessage(messageArray[i].Payload, messageArray[i].From, senderPubKey, &globalPrivKey)
+
 			if err != nil {
 				fmt.Print("Unable to decrypt message: ", err)
 			} else {
 				messageArray[i].decrypted = string(decryptedMessage)
+				
 				// Send read receipt
 				sendMessageToServer(username, messageArray[i].From, []byte(""), messageArray[i].Id)
 			}
