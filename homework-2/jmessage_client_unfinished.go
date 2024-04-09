@@ -50,6 +50,8 @@ var (
 	headlessMode        bool
 	messageIDCounter    int
 	attachmentsDir      string
+	attackFile          string
+	victimUsername      string
 	globalPubKey        PubKeyStruct
 	globalPrivKey       PrivKeyStruct
 )
@@ -346,6 +348,32 @@ func getUserListFromServer() ([]UserStruct, error) {
 	return result, nil
 }
 
+func sendAttachmentToServer(sender string, recipient string, message []byte, readReceiptID int, url string, localPath string) error {
+	posturl := serverProtocol + "://" + serverDomainAndPort + "/sendMessage/" +
+		username + "/" + apiKey
+
+	// Format the message as a JSON object and increment the message ID counter
+	msg := MessageStruct{sender, recipient, messageIDCounter, readReceiptID, b64.StdEncoding.EncodeToString(message), "", url, localPath}
+	messageIDCounter++
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	// Post it to the server
+	code, _, err := doPostRequest(posturl, body)
+	if err != nil {
+		return err
+	}
+
+	if code != 200 {
+		return errors.New("Bad result code")
+	}
+
+	return nil
+}
+
 // Post a message to the server
 func sendMessageToServer(sender string, recipient string, message []byte, readReceiptID int) error {
 	posturl := serverProtocol + "://" + serverDomainAndPort + "/sendMessage/" +
@@ -585,7 +613,7 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	senderPublicSigningKey, ok := preCheckedDecodedPublicKey.(*ecdsa.PublicKey)
 	if !ok {
 		fmt.Println("Error 5 in decryptMessage")
-		return nil, nil
+		return nil, err
 	}
 
 	// Sender Public Signing Key is an ecdsa.PublicKey
@@ -602,10 +630,8 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	ok = ecdsa.VerifyASN1(senderPublicSigningKey, toVerifyHash[:], decodedSignature)
 	if !ok {
 		fmt.Println("Signature Verification Failed")
-		return nil, nil
+		return nil, err
 	}
-
-	// WORKS UP TO HERE
 
 	// Decode Sender's Encryption Public Key
 	notParsedDecodedC1, err := b64.StdEncoding.DecodeString(parsedPayload.C1)
@@ -639,7 +665,6 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 		fmt.Println("Error 11 in decryptMessage")
 		return nil, err
 	}
-
 
 	privateRecipEncryptionKeyPreCheck, err := x509.ParsePKCS8PrivateKey(privateRecipEncKey)
 	if err != nil {
@@ -676,7 +701,6 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 		return nil, err
 	}
 
-
 	// Decode ChaCha
 	stream, err := chacha20.NewUnauthenticatedCipher(k[:], make([]byte, chacha20.NonceSize))
 
@@ -696,10 +720,12 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	computedChecksumBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(computedChecksumBytes, computedChecksum)
 
-	if !bytes.Equal(computedChecksumBytes, originalChecksum) {
-		fmt.Println("Rejected: 1")
-		return nil, nil
-	}
+	/*
+		if !bytes.Equal(computedChecksumBytes, originalChecksum) {
+			fmt.Println("Rejected: 1")
+			return nil, err
+		}
+	*/
 
 	// Compute Username Check
 
@@ -709,10 +735,10 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 
 	if !bytes.Equal(username, []byte(senderUsername)) {
 		fmt.Println("Rejected: 2")
-		return nil, nil
+		return nil, err
 	}
 
-	return originalMessage[indexOfColon+1:], nil
+	return originalMessage[indexOfColon+1:], err
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -813,7 +839,6 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	ciphertext := make([]byte, len(concatenatedMessageBytes))
 	cipherstream.XORKeyStream(ciphertext, concatenatedMessageBytes)
 
-
 	// Encode the ciphertext using BASE64
 	C2 := b64.StdEncoding.EncodeToString(ciphertext)
 
@@ -852,7 +877,7 @@ func decryptMessages(messageArray []MessageStruct) {
 
 		senderPubKey, _ := getPublicKeyFromServer(messageArray[i].From)
 
-		if messageArray[i].ReceiptID == 0 && len(messageArray[i].Payload) > 0 {
+		if messageArray[i].ReceiptID == 0 && len(messageArray[i].Payload) > 0 && messageArray[i].url == "" {
 
 			decryptedMessage, err := decryptMessage(messageArray[i].Payload, messageArray[i].From, senderPubKey, &globalPrivKey)
 
@@ -860,7 +885,7 @@ func decryptMessages(messageArray []MessageStruct) {
 				fmt.Print("Unable to decrypt message: ", err)
 			} else {
 				messageArray[i].decrypted = string(decryptedMessage)
-				
+
 				// Send read receipt
 				sendMessageToServer(username, messageArray[i].From, []byte(""), messageArray[i].Id)
 			}
@@ -887,6 +912,81 @@ func downloadAttachments(messageArray []MessageStruct) {
 			localPath := filepath.Join(attachmentsDir, "attachment_"+hex.EncodeToString(randBytes)+".dat")
 
 			err := downloadFileFromServer(messageArray[i].url, localPath)
+
+			senderPubKey, _ := getPublicKeyFromServer(messageArray[i].From)
+
+			// Decrypt the Message
+			decryptedMessage, err := decryptMessage(messageArray[i].Payload, messageArray[i].From, senderPubKey, &globalPrivKey)
+			if err != nil {
+				fmt.Print("Error 2 in Download Attachments")
+			} else {
+				messageArray[i].decrypted = string(decryptedMessage)
+			}
+
+			// Decrypt the DecryptedMessage
+			// Extracting fileURL
+			fileURLStart := strings.Index(messageArray[i].decrypted, "<") + 1
+			fileURLEnd := strings.Index(messageArray[i].decrypted, ">")
+			fileURL := messageArray[i].decrypted[fileURLStart:fileURLEnd]
+
+			// Extracting hexKey
+			hexKeyStart := strings.Index(messageArray[i].decrypted, "KEY=<") + 5
+			hexKeyEnd := strings.Index(messageArray[i].decrypted, ">?H=")
+			hexKey := messageArray[i].decrypted[hexKeyStart:hexKeyEnd]
+
+			// Extracting hash
+			hashStart := strings.Index(messageArray[i].decrypted, "H=<") + 3
+			hashEnd := len(messageArray[i].decrypted) - 1
+			hash := messageArray[i].decrypted[hashStart:hashEnd]
+
+			// Check URL
+			if fileURL != messageArray[i].url {
+				fmt.Println("Rejection of URL")
+				// Delete File
+			}
+
+			// Open File Contents
+			inFile, err := os.Open(localPath)
+			if err != nil {
+				fmt.Println("Error 3 in Download Attachments")
+				return
+			}
+
+			textCt, err := io.ReadAll(inFile)
+			if err != nil {
+				fmt.Print("Error 4 in Download Attachments")
+			}
+
+			inFile.Close()
+
+			// Check Hash
+
+			decodedHash, err := hex.DecodeString(hash)
+			var originalHash [32]byte
+			copy(originalHash[:], decodedHash)
+			checkHash := sha256.Sum256(textCt)
+			if originalHash != checkHash {
+				fmt.Println("Hashes do not match in Download Attachments")
+				return
+			}
+
+			// Create Key
+			key, err := hex.DecodeString(hexKey)
+
+			// Decrypt File
+			c, err := chacha20.NewUnauthenticatedCipher(key, make([]byte, chacha20.NonceSize))
+
+			// Decrypt the ciphertext
+			plaintext := make([]byte, len(textCt))
+			c.XORKeyStream(plaintext, textCt)
+
+			// Write to file
+
+			file, err := os.OpenFile(localPath, os.O_WRONLY|os.O_TRUNC, 0666)
+			defer file.Close()
+
+			_, err = file.Write(plaintext)
+
 			if err == nil {
 				messageArray[i].localPath = localPath
 			} else {
@@ -1022,6 +1122,8 @@ func main() {
 	flag.BoolVar(&strictTLS, "stricttls", false, "don't accept self-signed certificates from the server (default accepts them)")
 	flag.BoolVar(&doUserRegister, "reg", false, "register a new username and password")
 	flag.BoolVar(&headlessMode, "headless", false, "run in headless mode")
+	flag.StringVar(&attackFile, "attack", "", "run in attack mode")
+	flag.StringVar(&victimUsername, "victim", "alice", "victim username")
 	flag.Parse()
 
 	// Set the server protocol to http or https
@@ -1039,6 +1141,93 @@ func main() {
 
 	// Set up the server domain and port
 	serverDomainAndPort = serverDomain + ":" + strconv.Itoa(serverPort)
+
+	// Attack command loop
+	if attackFile != "" {
+
+		recoveredPlainText := ""
+
+		// Read the contents of the file
+		cipherText, err := os.ReadFile(attackFile)
+		if err != nil {
+			fmt.Println("Error opening ciphertext file for attack")
+			return
+		}
+
+		// Parse MessageStruct
+		var recoveredMessageStruct MessageStruct
+		err = json.Unmarshal(cipherText, recoveredMessageStruct)
+		sender := recoveredMessageStruct.From
+		intendedRecipient := recoveredMessageStruct.To
+		payload := recoveredMessageStruct.Payload
+
+		// Parse the ciphertext
+		b64payload, err := b64.StdEncoding.DecodeString(string(payload))
+		var parsedCipherText CiphertextStruct
+		err = json.Unmarshal(b64payload, &parsedCipherText)
+
+		C1, err := b64.StdEncoding.DecodeString(parsedCipherText.C1)
+		C2, err := b64.StdEncoding.DecodeString(parsedCipherText.C2)
+		sig, err := b64.StdEncoding.DecodeString(parsedCipherText.Sig)
+
+		// Begin for loop for length of message...?
+
+		// Modify ciphertext (change the below command)
+		modifiedUsername := username + ":"
+		usernameLength := len([]byte(username))
+
+		// Register new username
+		err = registerUserWithServer(modifiedUsername, password)
+		newAPIkey, err := serverLogin(username, password)
+
+		// New API key?
+		apiKey = newAPIkey
+
+		// Create new keys
+		globalPubKey, globalPrivKey, err = generatePublicKey()
+		_ = globalPrivKey // This suppresses a Golang "unused variable" error
+
+		// Nested for loop...?
+		for b := 0x01; b <= 0xFF; b++ {
+
+			// XOR b with the character after the :
+			locationOfXORByte := usernameLength + 1
+			originalByte := C2[locationOfXORByte]
+			C2[locationOfXORByte] = originalByte ^ byte(b)
+
+			// Re-Sign
+			// Signing starts here
+			toSign := b64.StdEncoding.EncodeToString(C1) + b64.StdEncoding.EncodeToString(C2)
+
+			// Hash Message before Signing
+			toSignHash := sha256.Sum256([]byte(toSign))
+
+			// Sign Message
+			signingPrivateKey := decodePrivateSigningKey(globalPrivKey)
+
+			signedMessagePreEncoding, err := ecdsa.SignASN1(rand.Reader, &signingPrivateKey, toSignHash[:])
+
+			signedMessage := b64.StdEncoding.EncodeToString(signedMessagePreEncoding)
+
+			// Redo Ciphertext
+			reEncodedCipherText := CiphertextStruct{
+				C1:  b64.StdEncoding.EncodeToString(C1),
+				C2:  b64.StdEncoding.EncodeToString(C2),
+				Sig: signedMessage,
+			}
+			SendingModifiedCipherText, err := json.Marshal(reEncodedCipherText)
+
+			// Send to Alice
+			sendMessageToServer(username, intendedRecipient, []byte(SendingModifiedCipherText), 0)
+
+			// See if Decrypted
+
+			// Add byte to plaintext, break from loop
+		}
+
+		// AND WE DO IT ALL AGAIN (fuck my life) (i wanna die) (oh my god) (why did i take this class)
+
+	}
 
 	// If we are registering a new username, let's do that first
 	if doUserRegister == true {
@@ -1150,7 +1339,7 @@ func main() {
 				// Format String and Send Message
 				attachmentString := ">>>MSGURL=<" + fileURL + ">?KEY=<" + hexKey + ">?H=<" + hash + ">"
 
-				sendMessageToServer(username, recipient, []byte(attachmentString), 0)
+				sendAttachmentToServer(username, recipient, []byte(attachmentString), 0, fileURL, encFilePath)
 			}
 		case "QUIT":
 			running = false
