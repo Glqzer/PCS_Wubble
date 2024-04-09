@@ -1168,65 +1168,81 @@ func main() {
 
 		C1, err := b64.StdEncoding.DecodeString(parsedCipherText.C1)
 		C2, err := b64.StdEncoding.DecodeString(parsedCipherText.C2)
-		sig, err := b64.StdEncoding.DecodeString(parsedCipherText.Sig)
+		modifiedUsername := sender
 
 		// Begin for loop for length of message...?
 
-		// Modify ciphertext (change the below command)
-		modifiedUsername := username + ":"
-		usernameLength := len([]byte(username))
+		for i := 1; i < (len([]byte(sender)) - 4); i++ {
 
-		// Register new username
-		err = registerUserWithServer(modifiedUsername, password)
-		newAPIkey, err := serverLogin(username, password)
+			// Modify ciphertext (change the below command)
+			for j := 1; j < i; j++ {
+				modifiedUsername = modifiedUsername + ":"
+			}
+			usernameLength := len([]byte(modifiedUsername))
 
-		// New API key?
-		apiKey = newAPIkey
+			// Register new username
+			err = registerUserWithServer(modifiedUsername, password)
+			newAPIkey, err := serverLogin(modifiedUsername, password)
+			if err != nil {
+				fmt.Println("Error logging in server for attack")
+				return
+			}
 
-		// Create new keys
-		globalPubKey, globalPrivKey, err = generatePublicKey()
-		_ = globalPrivKey // This suppresses a Golang "unused variable" error
+			// New API key?
+			apiKey = newAPIkey
 
-		// Nested for loop...?
-		for b := 0x01; b <= 0xFF; b++ {
+			// Create new keys
+			globalPubKey, globalPrivKey, err = generatePublicKey()
+			_ = globalPrivKey // This suppresses a Golang "unused variable" error
 
-			// XOR b with the character after the :
 			locationOfXORByte := usernameLength + 1
 			originalByte := C2[locationOfXORByte]
-			C2[locationOfXORByte] = originalByte ^ byte(b)
 
-			// Re-Sign
-			// Signing starts here
-			toSign := b64.StdEncoding.EncodeToString(C1) + b64.StdEncoding.EncodeToString(C2)
+			// Nested for loop...?
+			for b := 0x01; b <= 0xFF; b++ {
 
-			// Hash Message before Signing
-			toSignHash := sha256.Sum256([]byte(toSign))
+				// XOR b with the character after the :
+				C2[locationOfXORByte] = originalByte ^ byte(b)
 
-			// Sign Message
-			signingPrivateKey := decodePrivateSigningKey(globalPrivKey)
+				// Re-Sign
+				// Signing starts here
+				toSign := b64.StdEncoding.EncodeToString(C1) + b64.StdEncoding.EncodeToString(C2)
 
-			signedMessagePreEncoding, err := ecdsa.SignASN1(rand.Reader, &signingPrivateKey, toSignHash[:])
+				// Hash Message before Signing
+				toSignHash := sha256.Sum256([]byte(toSign))
 
-			signedMessage := b64.StdEncoding.EncodeToString(signedMessagePreEncoding)
+				// Sign Message
+				signingPrivateKey := decodePrivateSigningKey(globalPrivKey)
 
-			// Redo Ciphertext
-			reEncodedCipherText := CiphertextStruct{
-				C1:  b64.StdEncoding.EncodeToString(C1),
-				C2:  b64.StdEncoding.EncodeToString(C2),
-				Sig: signedMessage,
+				signedMessagePreEncoding, err := ecdsa.SignASN1(rand.Reader, &signingPrivateKey, toSignHash[:])
+				if err != nil {
+					fmt.Println("Error signing for attack")
+					return
+				}
+
+				signedMessage := b64.StdEncoding.EncodeToString(signedMessagePreEncoding)
+
+				// Redo Ciphertext
+				reEncodedCipherText := CiphertextStruct{
+					C1:  b64.StdEncoding.EncodeToString(C1),
+					C2:  b64.StdEncoding.EncodeToString(C2),
+					Sig: signedMessage,
+				}
+				SendingModifiedCipherText, err := json.Marshal(reEncodedCipherText)
+
+				// Send to Alice
+				sendMessageToServer(username, intendedRecipient, []byte(SendingModifiedCipherText), 0)
+
+				// See if Decrypted
+				messageList, err := getMessagesFromServer()
+				if len(messageList) > 0 {
+					recoveredPlainText += string(byte(':') ^ byte(b))
+					break
+				}
 			}
-			SendingModifiedCipherText, err := json.Marshal(reEncodedCipherText)
-
-			// Send to Alice
-			sendMessageToServer(username, intendedRecipient, []byte(SendingModifiedCipherText), 0)
-
-			// See if Decrypted
-
-			// Add byte to plaintext, break from loop
 		}
-
-		// AND WE DO IT ALL AGAIN (fuck my life) (i wanna die) (oh my god) (why did i take this class)
-
+		fmt.Println(recoveredPlainText)
+		return
 	}
 
 	// If we are registering a new username, let's do that first
