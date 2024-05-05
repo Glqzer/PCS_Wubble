@@ -388,11 +388,21 @@ func sendMessageToServer(sender string, recipient string, message []byte, readRe
 		return err
 	}
 
+	/*
+
+	//write body to a file
+	outFile, err := os.Create("interceptedFile.txt")
+	defer outFile.Close()
+	_, err = outFile.Write(body)
+
+	*/
+
 	// Post it to the server
 	code, _, err := doPostRequest(posturl, body)
 	if err != nil {
 		return err
 	}
+	
 
 	if code != 200 {
 		return errors.New("Bad result code")
@@ -594,6 +604,8 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 		return nil, err
 	}
 
+	fmt.Println(b64.StdEncoding.DecodeString(parsedPayload.C2))
+
 	// Create toVerify
 	toVerify := parsedPayload.C1 + parsedPayload.C2
 
@@ -629,6 +641,7 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	// Verify the signature
 	ok = ecdsa.VerifyASN1(senderPublicSigningKey, toVerifyHash[:], decodedSignature)
 	if !ok {
+		err = errors.New("Signature Verification Failed")
 		fmt.Println("Signature Verification Failed")
 		return nil, err
 	}
@@ -713,7 +726,7 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 
 	// Compute Check
 	originalMessage := decryptedMessage[:originalMessageLength]
-	originalChecksum := decryptedMessage[originalMessageLength:]
+	// originalChecksum := decryptedMessage[originalMessageLength:]
 	computedChecksum := crc32.ChecksumIEEE(originalMessage)
 
 	// Turn checkSum into bytes
@@ -729,16 +742,17 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 
 	// Compute Username Check
 
-	indexOfColon := bytes.IndexByte(originalMessage, 0x3A)
+	usernameLength := len(senderUsername)
 
-	username := originalMessage[:indexOfColon]
+	usernameCheck := originalMessage[:usernameLength]
 
-	if !bytes.Equal(username, []byte(senderUsername)) {
+	if !bytes.Equal(usernameCheck, []byte(senderUsername)) {
 		fmt.Println("Rejected: 2")
+		err = errors.New("Rejected Username")
 		return nil, err
 	}
 
-	return originalMessage[indexOfColon+1:], err
+	return originalMessage[usernameLength+1:], err
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -1156,7 +1170,7 @@ func main() {
 
 		// Parse MessageStruct
 		var recoveredMessageStruct MessageStruct
-		err = json.Unmarshal(cipherText, recoveredMessageStruct)
+		err = json.Unmarshal(cipherText, &recoveredMessageStruct)
 		sender := recoveredMessageStruct.From
 		intendedRecipient := recoveredMessageStruct.To
 		payload := recoveredMessageStruct.Payload
@@ -1168,38 +1182,53 @@ func main() {
 
 		C1, err := b64.StdEncoding.DecodeString(parsedCipherText.C1)
 		C2, err := b64.StdEncoding.DecodeString(parsedCipherText.C2)
-		modifiedUsername := sender
 
 		// Begin for loop for length of message...?
 
-		for i := 1; i < (len([]byte(sender)) - 4); i++ {
+		for i := 1; i < (len(C2) - len([]byte(sender)) - 5); i++ {
 
 			// Modify ciphertext (change the below command)
-			for j := 1; j < i; j++ {
-				modifiedUsername = modifiedUsername + ":"
-			}
-			usernameLength := len([]byte(modifiedUsername))
+			colons := strings.Repeat(":", i)
+			modifiedUsername := sender + colons
+			usernameLength := len((modifiedUsername))
 
 			// Register new username
-			err = registerUserWithServer(modifiedUsername, password)
+				fmt.Println("Registering new user...")
+				err := registerUserWithServer(modifiedUsername, password)
+				if err != nil {
+					fmt.Println("Unable to register username with server (user may already exist)")
+				}		
+			// Connect and log in to the server
+			fmt.Print("Logging in to server... ")
 			newAPIkey, err := serverLogin(modifiedUsername, password)
 			if err != nil {
-				fmt.Println("Error logging in server for attack")
-				return
+				fmt.Println("Unable to connect to server, exiting.")
+				os.Exit(1)
+			}
+			fmt.Println("success!")
+			apiKey = newAPIkey
+		
+			// Geerate a fresh public key, then upload it to the server
+			globalPubKey, globalPrivKey, err := generatePublicKey()
+			_ = globalPrivKey // This suppresses a Golang "unused variable" error
+			if err != nil {
+				fmt.Println("Unable to generate public key, exiting.")
+				os.Exit(1)
+			}
+		
+			err = registerPublicKeyWithServer(modifiedUsername, globalPubKey)
+			if err != nil {
+				fmt.Println("Unable to register public key with server, exiting.")
+				os.Exit(1)
 			}
 
-			// New API key?
-			apiKey = newAPIkey
-
-			// Create new keys
-			globalPubKey, globalPrivKey, err = generatePublicKey()
-			_ = globalPrivKey // This suppresses a Golang "unused variable" error
-
-			locationOfXORByte := usernameLength + 1
+			locationOfXORByte := usernameLength
 			originalByte := C2[locationOfXORByte]
 
 			// Nested for loop...?
 			for b := 0x01; b <= 0xFF; b++ {
+
+				fmt.Println("trying byte ", b, "message index ", i)
 
 				// XOR b with the character after the :
 				C2[locationOfXORByte] = originalByte ^ byte(b)
@@ -1222,6 +1251,9 @@ func main() {
 
 				signedMessage := b64.StdEncoding.EncodeToString(signedMessagePreEncoding)
 
+				fmt.Println(modifiedUsername)
+				fmt.Println(C2)
+
 				// Redo Ciphertext
 				reEncodedCipherText := CiphertextStruct{
 					C1:  b64.StdEncoding.EncodeToString(C1),
@@ -1230,14 +1262,15 @@ func main() {
 				}
 				SendingModifiedCipherText, err := json.Marshal(reEncodedCipherText)
 
+
+
 				// Send to Alice
-				sendMessageToServer(username, intendedRecipient, []byte(SendingModifiedCipherText), 0)
+				sendMessageToServer(modifiedUsername, intendedRecipient, []byte(SendingModifiedCipherText), 0)
 
 				// See if Decrypted
 				messageList, err := getMessagesFromServer()
-				if len(messageList) > 0 {
-					recoveredPlainText += string(byte(':') ^ byte(b))
-					break
+				if len(messageList) != 0 {
+					recoveredPlainText = recoveredPlainText + string(byte(':')^byte(b))
 				}
 			}
 		}
